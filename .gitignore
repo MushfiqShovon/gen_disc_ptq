@@ -1,5 +1,4 @@
 /nlp-env/
 /data/ag_news/
 /__pycache__/
-
 *.log
