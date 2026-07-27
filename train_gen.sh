@@ -34,6 +34,7 @@ if [[ ! -f "$CACHE" ]]; then
     "$PYTHON" training/preprocess.py
 fi
 
+mkdir -p logs
 echo "==> training generative classifier"
 "$PYTHON" -u training/GenTrain.py \
     --data          "$CACHE" \
@@ -49,6 +50,6 @@ echo "==> training generative classifier"
     --dropout       0.0 \
     --clip          1.0 \
     --log-interval  200 \
-    "$@" 2>&1 | tee train_gen.log
+    "$@" 2>&1 | tee logs/train_gen.log
 
-echo "==> done, log written to train_gen.log"
+echo "==> done, log written to logs/train_gen.log"

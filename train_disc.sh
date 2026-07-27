@@ -34,6 +34,7 @@ if [[ ! -f "$CACHE" ]]; then
     "$PYTHON" training/preprocess.py
 fi
 
+mkdir -p logs
 echo "==> training discriminative classifier"
 "$PYTHON" -u training/DiscTrain.py \
     --data          "$CACHE" \
@@ -48,6 +49,6 @@ echo "==> training discriminative classifier"
     --dropout       0.5 \
     --clip          1.0 \
     --log-interval  200 \
-    "$@" 2>&1 | tee train_disc.log
+    "$@" 2>&1 | tee logs/train_disc.log
 
-echo "==> done, log written to train_disc.log"
+echo "==> done, log written to logs/train_disc.log"
