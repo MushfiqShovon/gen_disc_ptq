@@ -24,6 +24,10 @@ import torch
 UNK, BOS, EOS = '<unk>', '<bos>', '<eos>'
 SPECIALS = [UNK, BOS, EOS]
 
+# Paths default to the repo root, not the caller's cwd, so the scripts in
+# training/ behave the same however they are invoked.
+ROOT = Path(__file__).resolve().parents[1]
+
 # AG News uses "\\" as a paragraph break and is littered with half-escaped HTML
 # entities ("#39;", "quot;") that lost their leading ampersand.
 _BARE_NUMERIC = re.compile(r'(?<!&)#(\d+);')
@@ -78,8 +82,8 @@ def flatten(sequences, labels):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--data-dir', type=Path, default=Path('data/ag_news'))
-    p.add_argument('--out', type=Path, default=Path('data/ag_news/processed/agnews.pt'))
+    p.add_argument('--data-dir', type=Path, default=ROOT / 'data/ag_news')
+    p.add_argument('--out', type=Path, default=ROOT / 'data/ag_news/processed/agnews.pt')
     p.add_argument('--max-len', type=int, default=80, help='truncate sentences to this many tokens')
     p.add_argument('--max-vocab', type=int, default=40000)
     p.add_argument('--min-freq', type=int, default=5)

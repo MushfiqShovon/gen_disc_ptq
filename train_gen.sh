@@ -30,12 +30,12 @@ fi
 # One-off data preparation; skipped once the cache exists.
 if [[ ! -f "$CACHE" ]]; then
     echo "==> $CACHE missing, running one-off data preparation"
-    "$PYTHON" prepare_data.py
-    "$PYTHON" preprocess.py
+    "$PYTHON" training/prepare_data.py
+    "$PYTHON" training/preprocess.py
 fi
 
 echo "==> training generative classifier"
-"$PYTHON" -u GenTrain.py \
+"$PYTHON" -u training/GenTrain.py \
     --data          "$CACHE" \
     --out           checkpoints/gen_lstm_agnews.pth \
     --epochs        100 \

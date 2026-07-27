@@ -19,6 +19,10 @@ BASE = 'https://raw.githubusercontent.com/mhjabreel/CharCnn_Keras/master/data/ag
 COLUMNS = ['label', 'title', 'desc']
 SEED = 2021
 
+# Paths default to the repo root, not the caller's cwd, so the scripts in
+# training/ behave the same however they are invoked.
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def download(name, dest):
     if dest.exists():
@@ -30,7 +34,7 @@ def download(name, dest):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--data-dir', type=Path, default=Path('data/ag_news'))
+    p.add_argument('--data-dir', type=Path, default=ROOT / 'data/ag_news')
     p.add_argument('--valid-per-class', type=int, default=2500)
     args = p.parse_args()
     args.data_dir.mkdir(parents=True, exist_ok=True)

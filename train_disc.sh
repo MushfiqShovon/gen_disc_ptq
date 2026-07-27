@@ -30,12 +30,12 @@ fi
 # One-off data preparation; skipped once the cache exists.
 if [[ ! -f "$CACHE" ]]; then
     echo "==> $CACHE missing, running one-off data preparation"
-    "$PYTHON" prepare_data.py
-    "$PYTHON" preprocess.py
+    "$PYTHON" training/prepare_data.py
+    "$PYTHON" training/preprocess.py
 fi
 
 echo "==> training discriminative classifier"
-"$PYTHON" -u DiscTrain.py \
+"$PYTHON" -u training/DiscTrain.py \
     --data          "$CACHE" \
     --out           checkpoints/disc_lstm_agnews.pth \
     --epochs        100 \

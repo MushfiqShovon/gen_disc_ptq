@@ -24,6 +24,10 @@ import agnews_data
 from agnews_data import SEED
 from models import DiscModel
 
+# Paths default to the repo root, not the caller's cwd, so the scripts in
+# training/ behave the same however they are invoked.
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def collate(batch):
     """Pad to the longest document in the batch and keep the true lengths."""
@@ -82,8 +86,8 @@ def train_epoch(loader, model, criterion, optimizer, device, epoch, args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--data', type=Path, default=Path('data/ag_news/processed/agnews.pt'))
-    p.add_argument('--out', type=Path, default=Path('checkpoints/disc_lstm_agnews.pth'))
+    p.add_argument('--data', type=Path, default=ROOT / 'data/ag_news/processed/agnews.pt')
+    p.add_argument('--out', type=Path, default=ROOT / 'checkpoints/disc_lstm_agnews.pth')
     p.add_argument('--epochs', type=int, default=10)
     p.add_argument('--batch-size', type=int, default=64)
     p.add_argument('--lr', type=float, default=1e-3)

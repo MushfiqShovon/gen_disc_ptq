@@ -112,25 +112,37 @@ best-on-dev checkpoint to `checkpoints/`.
 ### Running the stages by hand
 
 ```bash
-./nlp-env/bin/python prepare_data.py    # download AG News + stratified dev split
-./nlp-env/bin/python preprocess.py      # clean, tokenise, build vocab, cache
-./nlp-env/bin/python DiscTrain.py --epochs 15 --dropout 0.5
-./nlp-env/bin/python GenTrain.py  --epochs 20
+./nlp-env/bin/python training/prepare_data.py   # download AG News + stratified dev split
+./nlp-env/bin/python training/preprocess.py     # clean, tokenise, build vocab, cache
+./nlp-env/bin/python training/DiscTrain.py --epochs 15 --dropout 0.5
+./nlp-env/bin/python training/GenTrain.py  --epochs 20
 ```
 
 `--help` on any of them lists the full flag set.
 
 ## Repository layout
 
+```
+├── train_disc.sh, train_gen.sh   entry points — run these
+├── README.md
+├── training/                     all training code
+├── checkpoints/                  best-on-dev weights
+└── data/ag_news/                 downloaded + preprocessed data (gitignored)
+```
+
 | File | Purpose |
 |---|---|
-| `prepare_data.py` | One-off: download AG News, carve a stratified 10k dev split off the 120k train set |
-| `preprocess.py` | One-off: clean, tokenise with spaCy, build the vocab, cache token ids |
-| `agnews_data.py` | Shared `Dataset` + loader construction used by both trainers |
-| `models.py` | `DiscModel`, `GenModel` (plus an unused `MLPFeatureExtractor`) |
-| `DiscTrain.py` | Discriminative training / evaluation |
-| `GenTrain.py` | Generative training / evaluation |
 | `train_disc.sh`, `train_gen.sh` | Best-known configurations, end to end |
+| `training/prepare_data.py` | One-off: download AG News, carve a stratified 10k dev split off the 120k train set |
+| `training/preprocess.py` | One-off: clean, tokenise with spaCy, build the vocab, cache token ids |
+| `training/agnews_data.py` | Shared `Dataset` + loader construction used by both trainers |
+| `training/models.py` | `DiscModel`, `GenModel` (plus an unused `MLPFeatureExtractor`) |
+| `training/DiscTrain.py` | Discriminative training / evaluation |
+| `training/GenTrain.py` | Generative training / evaluation |
+
+Paths inside `training/` resolve against the repo root rather than the working
+directory, so the scripts behave identically whether you invoke them via the shell
+wrappers, from the root, or from inside `training/`.
 
 Preprocessing is deliberately split out from training: spaCy tokenisation of 127k
 documents is a one-off job, and caching it means both models provably consume
