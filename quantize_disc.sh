@@ -34,18 +34,22 @@ fi
 # Default bit width, overridden by a --bit-width in the passthrough args so that
 # the log file name matches whatever actually runs.
 BITS=8
+GPXQ=none
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[i]}" in
         --bit-width)   BITS="${args[i + 1]}" ;;
         --bit-width=*) BITS="${args[i]#*=}" ;;
+        --gpxq)        GPXQ="${args[i + 1]}" ;;
+        --gpxq=*)      GPXQ="${args[i]#*=}" ;;
     esac
 done
+SUFFIX=""; [[ "$GPXQ" != "none" ]] && SUFFIX="_${GPXQ}"
 
 mkdir -p logs
-LOG="logs/ptq_disc_int${BITS}.log"
+LOG="logs/ptq_disc_int${BITS}${SUFFIX}.log"
 
-echo "==> static PTQ of the discriminative classifier at ${BITS} bits"
+echo "==> static PTQ of the discriminative classifier at ${BITS} bits (gpxq=${GPXQ})"
 "$PYTHON" -W ignore -u quantization/ptq_disc.py \
     --checkpoint    "$CKPT" \
     --bit-width     "$BITS" \

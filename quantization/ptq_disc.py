@@ -25,6 +25,10 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from brevitas.graph.calibrate import bias_correction_mode, calibration_mode
+from brevitas.graph.gpfq import GPFQ, gpfq_mode
+from brevitas.graph.qronos import Qronos
+
+GPXQ_ALGORITHMS = {'gpfq': GPFQ, 'qronos': Qronos}
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'training'))
@@ -88,6 +92,35 @@ def calibrate(model, loader, device, batches, bias_correction, classes):
     return model
 
 
+def apply_gpxq(model, loader, device, batches, algorithm):
+    """Run GPFQ (or Qronos) after activation calibration.
+
+    Expect almost nothing here. GPxQ only handles nn.Linear/Conv, and in this
+    model that is the 400-weight classifier -- 0.014% of the parameters. The
+    embedding (97%) and the LSTM gates (3%) are ineligible by construction, so
+    there is essentially no weight error for it to redistribute. Contrast the
+    generative model, where the decoder makes 66% of the weights eligible.
+    """
+    impl = GPXQ_ALGORITHMS[algorithm]
+    start = time.time()
+    with torch.no_grad(), gpfq_mode(model, algorithm_impl=impl, use_quant_activations=True,
+                                    create_weight_orig=True) as gpfq:
+        inner = gpfq.model
+        eligible = sum(m.weight.numel() for m in model.modules()
+                       if isinstance(m, nn.Linear) and hasattr(m, 'weight_quant'))
+        total = sum(p.numel() for p in model.parameters())
+        print(f'    {algorithm}: {gpfq.num_layers} eligible layer(s), '
+              f'{eligible:,}/{total:,} weights ({100 * eligible / total:.3f}%)')
+        for _ in range(gpfq.num_layers):
+            for index, (text, lengths, _) in enumerate(loader):
+                if index >= batches:
+                    break
+                inner(text.to(device), lengths)
+            gpfq.update()
+    print(f'    {algorithm}: {batches} batches in {time.time() - start:.1f}s')
+    return model
+
+
 def footprint(model, bit_width):
     """Weight footprint at fp32 vs at `bit_width`.
 
@@ -125,6 +158,9 @@ def main():
                    help='training batches used to calibrate activation scales')
     p.add_argument('--bias-correction', action='store_true',
                    help='opt-in; brevitas 0.13.0 does not support this for QuantLSTM')
+    p.add_argument('--gpxq', choices=('none', 'gpfq', 'qronos'), default='none',
+                   help='weight-error-correcting algorithm applied after calibration')
+    p.add_argument('--gpxq-batches', type=int, default=32)
     p.add_argument('--skip-float-reference', action='store_true',
                    help='skip the quantizers-off sanity evaluation (it is slow)')
     args = p.parse_args()
@@ -132,7 +168,8 @@ def main():
     # Name the checkpoint after the bit width so an ablation sweep does not
     # overwrite its own earlier runs.
     if args.out is None:
-        args.out = ROOT / f'checkpoints/disc_lstm_agnews_int{args.bit_width}.pth'
+        suffix = '' if args.gpxq == 'none' else f'_{args.gpxq}'
+        args.out = ROOT / f'checkpoints/disc_lstm_agnews_int{args.bit_width}{suffix}.pth'
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     torch.manual_seed(agnews_data.SEED)
@@ -168,10 +205,13 @@ def main():
     calibrate(quantized, loaders['train'], device, args.calib_batches,
               bias_correction=args.bias_correction, classes=classes)
 
+    if args.gpxq != 'none':
+        apply_gpxq(quantized, loaders['train'], device, args.gpxq_batches, args.gpxq)
+
     print('\n== quantized ==')
+    tag = f'int{args.bit_width}' + ('' if args.gpxq == 'none' else f'+{args.gpxq}')
     dev_acc = report('   dev', loaders['valid'], quantized, criterion, device)
-    test_acc = report(f'3. int{args.bit_width} test', loaders['test'], quantized, criterion,
-                      device, fp32_acc)
+    test_acc = report(f'3. {tag}', loaders['test'], quantized, criterion, device, fp32_acc)
 
     print()
     footprint(quantized, args.bit_width)

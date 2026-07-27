@@ -22,6 +22,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from brevitas.graph.calibrate import bias_correction_mode, calibration_mode
+from brevitas.graph.gpfq import GPFQ, gpfq_mode
+from brevitas.graph.qronos import Qronos
+
+GPXQ_ALGORITHMS = {'gpfq': GPFQ, 'qronos': Qronos}
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'training'))
@@ -106,6 +110,41 @@ def calibrate(model, loader, device, batches, bias_correction, classes):
     return model
 
 
+def apply_gpxq(model, loader, device, batches, nclass, algorithm):
+    """Run GPFQ (or Qronos) on the decoder after activation calibration.
+
+    GPxQ only handles nn.Linear/Conv, so the sole eligible module here is the
+    decoder -- which is 66% of this model's weights, making it well worth doing.
+    The embedding and the LSTM gates are untouched by construction.
+
+    Note this must drive `model(...)`, not encode/decode directly: gpfq_mode
+    replaces `forward` with a wrapper that runs the batch twice, once with
+    quantization live to capture the layer's quantized input and once with it
+    disabled to capture the float reference. Calling the halves separately would
+    bypass that entirely.
+
+    Every candidate label is fed, because at inference the decoder sees
+    [h_t ; v_y] for all y -- that, not the training distribution, is the input
+    distribution GPFQ should be minimising error over.
+    """
+    impl = GPXQ_ALGORITHMS[algorithm]
+    start = time.time()
+    with torch.no_grad(), gpfq_mode(model, algorithm_impl=impl, use_quant_activations=True,
+                                    create_weight_orig=True) as gpfq:
+        inner = gpfq.model
+        print(f'    {algorithm}: {gpfq.num_layers} eligible layer(s)')
+        for _ in range(gpfq.num_layers):
+            for index, (text, lengths, _) in enumerate(loader):
+                if index >= batches:
+                    break
+                inputs, _, _ = split_teacher_forced(text, lengths, device)
+                for label in range(nclass):
+                    inner(inputs, label)
+            gpfq.update()
+    print(f'    {algorithm}: {batches} batches x {nclass} labels in {time.time() - start:.1f}s')
+    return model
+
+
 def footprint(model, bit_width):
     """Weight footprint at fp32 vs at `bit_width`. Brevitas quantization is
     simulated, so this is what an int export *would* occupy."""
@@ -130,11 +169,16 @@ def main():
     p.add_argument('--calib-batches', type=int, default=64)
     p.add_argument('--bias-correction', action='store_true',
                    help='opt-in; brevitas 0.13.0 does not support this for QuantLSTM')
+    p.add_argument('--gpxq', choices=('none', 'gpfq', 'qronos'), default='none',
+                   help='weight-error-correcting algorithm applied after calibration')
+    p.add_argument('--gpxq-batches', type=int, default=32,
+                   help='calibration batches for GPFQ/Qronos (each runs all labels, twice)')
     p.add_argument('--skip-float-reference', action='store_true')
     args = p.parse_args()
 
     if args.out is None:
-        args.out = ROOT / f'checkpoints/gen_lstm_agnews_int{args.bit_width}.pth'
+        suffix = '' if args.gpxq == 'none' else f'_{args.gpxq}'
+        args.out = ROOT / f'checkpoints/gen_lstm_agnews_int{args.bit_width}{suffix}.pth'
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     torch.manual_seed(agnews_data.SEED)
@@ -184,13 +228,17 @@ def main():
     calibrate(quantized, padded['train'], device, args.calib_batches,
               args.bias_correction, classes)
 
+    if args.gpxq != 'none':
+        apply_gpxq(quantized, padded['train'], device, args.gpxq_batches, nclass, args.gpxq)
+
     print('\n== quantized ==')
     start = time.time()
     dev_nll, dev_acc = evaluate(padded['valid'], quantized, device, nclass)
     print(f'     dev                 nll {dev_nll:7.1f} | acc {dev_acc:6.2f}   [{time.time() - start:.0f}s]')
     start = time.time()
     test_nll, test_acc = evaluate(padded['test'], quantized, device, nclass)
-    print(f'  3. int{args.bit_width} test          nll {test_nll:7.1f} | acc {test_acc:6.2f}  '
+    tag = f'int{args.bit_width}' + ('' if args.gpxq == 'none' else f'+{args.gpxq}')
+    print(f'  3. {tag:18s} nll {test_nll:7.1f} | acc {test_acc:6.2f}  '
           f'({test_acc - fp32_acc:+.2f} vs float32)   [{time.time() - start:.0f}s]')
 
     print()
