@@ -526,12 +526,79 @@ logits unquantized, bias correction off.
 | `run_ptq.sh` | Grid driver (`--model`, `--bits`, `--gpxq`, `--collect-only`, passthrough) |
 | `results/ptq_results.csv` | The results table (tracked in git; logs are not) |
 
-## 13. Open threads
+## 13. Calibration-sensitivity experiment (both models)
+
+Does class imbalance in the calibration set matter? Schemes at a fixed 8,192-doc
+budget — all_class 25/25/25/25, three_class 33/33/33/0, two_class 50/50/0/0,
+one_class 100/0/0/0 (Class 1..4 = World/Sports/Business/SciTech) — built once by
+`quantization/make_calib_sets.py` (byte-reproducible; per-class permutation
+prefixes so schemes share documents; saved order pre-shuffled so GPFQ's
+2,048-doc prefix keeps each scheme's mix). Both calibration *and* GPFQ consume
+the scheme data. 64 cells in `results/calib_sensitivity.csv`; regenerate with
+`./run_calib_sensitivity.sh [--model gen] [--gpxq gpfq]`.
+
+**Discriminative** (fp32 91.99), plain / +GPFQ:
+
+| Scheme | int8 | int6 | int4 | int3 |
+|---|---|---|---|---|
+| all_class | 91.91 / 91.86 | 91.51 / 91.55 | 65.71 / 73.32 | 36.54 / 26.36 |
+| three_class | 91.92 / 91.88 | 91.55 / 91.62 | 68.72 / 73.46 | 36.04 / 27.29 |
+| two_class | 91.89 / 91.89 | 91.74 / 91.74 | 70.66 / 73.70 | 36.05 / 24.80 |
+| one_class | 91.93 / 91.92 | 91.32 / 91.26 | **71.50** / **55.32** | 36.07 / 24.46 |
+
+**Generative** (fp32 90.67), plain / +GPFQ:
+
+| Scheme | int8 | int6 | int4 | int3 |
+|---|---|---|---|---|
+| all_class | 90.75 / 90.78 | 90.38 / 90.61 | 61.45 / 86.84 | 23.08 / 89.01 |
+| three_class | 90.72 / 90.72 | 90.50 / 90.72 | 61.45 / 87.76 | 23.08 / 89.01 |
+| two_class | 90.74 / 90.71 | 90.33 / 90.54 | 61.45 / **88.22** | 23.08 / 89.01 |
+| one_class | 90.70 / 90.72 | 90.51 / 90.68 | 62.34 / 86.50 | 23.08 / 89.01 |
+
+Findings:
+
+1. **Activation-scale calibration is nearly imbalance-immune** (int8 spreads:
+   disc 0.04, gen 0.05). Even 100% single-class calibration is fine at 8 bits.
+   Do not bother stratifying calibration data for plain PTQ on data like this.
+2. **Disc int4 plain: imbalance *helps*, monotonically** (65.71 → 71.50, +5.8).
+   Verified mechanism via scale dump: less diverse data → tighter observed
+   ranges → smaller scales precisely at the §9 bottleneck quantizers
+   (cell-state 5.19→4.58, forget-gate accumulator 10.21→8.38; embedding scale
+   immobile at 1.1794). Balanced calibration maximises observed range — the
+   worst case for a min-max-style observer at 16 levels.
+3. **Disc int4+GPFQ: robust to partial imbalance, catastrophic at total
+   imbalance.** three/two_class ≈ balanced (73.5/73.7 vs 73.3), but one_class
+   collapses to 55.32 — worse than *skipping GPFQ entirely* (71.50). Rule:
+   **scale calibration needs range coverage; GPFQ weight-fitting needs
+   distributional coverage.**
+4. **The gen model is composition-proof everywhere**, including the GPFQ
+   one_class cell (86.50 vs balanced 86.84 — no disc-style collapse). GPFQ on
+   the decoder sweeps all four `v_y` regardless of which documents are fed, so
+   the label side of its input distribution is guaranteed by construction;
+   text-side coverage barely matters.
+5. **The h_T = 0 discovery.** Gen int3 rows are *bit-identical* across schemes
+   (plain NLL 456.0952, +GPFQ 436.1159, all four schemes) — initially suspected
+   as a harness bug, ruled out (per-scheme compositions confirmed in logs;
+   12/14 calibrated scales differ between schemes). The measured cause: at int3
+   the quantized LSTM's output is **exactly zero for every input**
+   (mean|h_T| = 0.0000, std across documents 0.0000; at int8: 0.525 / 0.235).
+   The differing scales multiply a dead signal. This upgrades §9.4's hypothesis
+   to measurement: the int3+GPFQ 89.01 classifier runs on `decoder([0 ; v_y])`
+   alone — a label-embedding-only model — and scheme differences land in decoder
+   columns that multiply zero at eval. Diagnostic heuristic worth keeping:
+   *bit-identical results across varied conditions mean an upstream stage has
+   gone constant — measure signal variance before suspecting the harness.*
+   (Gen int4 plain shows the same signature in weaker form: three schemes
+   bit-identical at 61.45, h nearly dead.)
+
+## 14. Open threads
 
 - Split the shared `[h_t ; v_y]` quantization scale in `QuantGenModel` — the
   prime suspect for the gen int3 below-chance inversion under plain PTQ.
-- Stage isolation on the generative model — would test the "v_y bypasses the
-  LSTM" survival hypothesis (§9.4).
+- ~~Stage isolation on the generative model — would test the "v_y bypasses the
+  LSTM" survival hypothesis (§9.4).~~ Resolved by measurement in §13.5: at int3
+  the gen LSTM output is exactly zero; the surviving classifier is
+  `decoder([0 ; v_y])`.
 - Mixed-precision run as a headline configuration (disc LSTM@8, rest@3/4).
 - Qronos hyperparameters on the generative model.
 - Per-channel weight quantization (`Int8WeightPerChannelFloat`) — everything

@@ -57,6 +57,23 @@ def run_batches(model, loader, device, limit):
     return torch.cat(seen) if seen else torch.empty(0, dtype=torch.long)
 
 
+def calibration_source(args, fallback_loader, collate_fn):
+    """(loader, batch_limit, scheme) for calibration + GPxQ.
+
+    Default: the shuffled training loader, capped at --calib-batches ('random'
+    scheme). With --calib-file: a saved, class-imbalanced calibration set from
+    make_calib_sets.py -- consumed in full, in its saved (pre-shuffled) order so
+    runs are deterministic and any prefix keeps the scheme's class mix.
+    """
+    if args.calib_file is None:
+        return fallback_loader, args.calib_batches, 'random'
+    saved = torch.load(args.calib_file, weights_only=False)
+    loader = torch.utils.data.DataLoader(
+        agnews_data.AGNews(saved), batch_size=args.batch_size,
+        shuffle=False, collate_fn=collate_fn)
+    return loader, len(loader), saved['meta']['scheme']
+
+
 def calibrate(model, loader, device, batches, bias_correction, classes):
     model.eval()
     start = time.time()
@@ -69,7 +86,7 @@ def calibrate(model, loader, device, batches, bias_correction, classes):
     # composition is on the record for each run.
     counts = torch.bincount(labels, minlength=len(classes)).tolist()
     spread = ' '.join(f'{c}={n}' for c, n in zip(classes, counts))
-    print(f'    calibration sample:     {len(labels):,} training docs (random, unstratified)')
+    print(f'    calibration sample:     {len(labels):,} training docs')
     print(f'                            {spread}')
 
     if bias_correction:
@@ -165,11 +182,20 @@ def main():
     p.add_argument('--gpxq-batches', type=int, default=32)
     p.add_argument('--skip-float-reference', action='store_true',
                    help='skip the quantizers-off sanity evaluation (it is slow)')
-    p.add_argument('--results', type=Path, default=ROOT / 'results/ptq_results.csv')
+    p.add_argument('--calib-file', type=Path, default=None,
+                   help='saved calibration set from make_calib_sets.py; overrides '
+                        'the random training sample (calibration-sensitivity runs)')
+    p.add_argument('--no-save', action='store_true', help='skip writing the checkpoint')
+    p.add_argument('--results', type=Path, default=None,
+                   help='default: results/ptq_results.csv, or '
+                        'results/calib_sensitivity.csv when --calib-file is given')
     args = p.parse_args()
 
     # Name the checkpoint after the bit width so an ablation sweep does not
     # overwrite its own earlier runs.
+    if args.results is None:
+        args.results = ROOT / ('results/calib_sensitivity.csv' if args.calib_file
+                               else 'results/ptq_results.csv')
     if args.out is None:
         suffix = '' if args.gpxq == 'none' else f'_{args.gpxq}'
         args.out = ROOT / f'checkpoints/disc_lstm_agnews_int{args.bit_width}{suffix}.pth'
@@ -203,15 +229,16 @@ def main():
         _, float_ref_acc = report('2. float reference', loaders['test'], reference.to(device),
                                criterion, device, fp32_acc)
 
-    print(f'\n== calibrating on {args.calib_batches} training batches ==')
+    calib_loader, calib_limit, scheme = calibration_source(args, loaders['train'], collate)
+    print(f'\n== calibrating on {calib_limit} batches (scheme: {scheme}) ==')
     quantized = QuantDiscModel(**dims, bit_width=args.bit_width, quant=True)
     load_float_weights(quantized, state)
     quantized.to(device)
-    calibrate(quantized, loaders['train'], device, args.calib_batches,
+    calibrate(quantized, calib_loader, device, calib_limit,
               bias_correction=args.bias_correction, classes=classes)
 
     if args.gpxq != 'none':
-        apply_gpxq(quantized, loaders['train'], device, args.gpxq_batches, args.gpxq)
+        apply_gpxq(quantized, calib_loader, device, args.gpxq_batches, args.gpxq)
 
     print('\n== quantized ==')
     tag = f'int{args.bit_width}' + ('' if args.gpxq == 'none' else f'+{args.gpxq}')
@@ -223,21 +250,28 @@ def main():
     fp32_mb, quant_mb, ratio = footprint(quantized, args.bit_width)
 
     row = {'model': 'disc', 'bit_width': args.bit_width, 'gpxq': args.gpxq,
+           'calib_scheme': scheme,
            'fp32_test_acc': f'{fp32_acc:.2f}', 'float_ref_test_acc': (
                f'{float_ref_acc:.2f}' if float_ref_acc != '' else ''),
            'dev_acc': f'{dev_acc:.2f}', 'test_acc': f'{test_acc:.2f}',
            'delta_vs_fp32': f'{test_acc - fp32_acc:+.2f}', 'test_metric': f'{test_loss:.4f}',
-           'calib_docs': args.calib_batches * args.batch_size,
+           'calib_docs': (len(calib_loader.dataset) if args.calib_file
+                          else args.calib_batches * args.batch_size),
            'gpxq_batches': args.gpxq_batches if args.gpxq != 'none' else '',
            'fp32_mb': f'{fp32_mb:.2f}', 'quant_mb': f'{quant_mb:.2f}',
            'compression': f'{ratio:.2f}'}
-    print(f'  recorded -> {results.record(args.results, row)}')
+    sens = scheme != 'random'
+    print(f'  recorded -> {results.record(args.results, row, results.CALIB_FIELDS if sens else results.FIELDS, results.CALIB_KEY if sens else results.KEY)}')
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({'state_dict': quantized.state_dict(), 'vocab': vocab, 'classes': classes,
-                'args': vars(args) | dims, 'test_acc': test_acc, 'dev_acc': dev_acc,
-                'fp32_test_acc': fp32_acc}, args.out)
-    print(f'\nsaved {args.out}')
+    if args.no_save:
+        print('\ncheckpoint not saved (--no-save)')
+    else:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({'state_dict': quantized.state_dict(), 'vocab': vocab, 'classes': classes,
+                    'args': {k: str(v) for k, v in vars(args).items()} | dims,
+                    'test_acc': test_acc, 'dev_acc': dev_acc,
+                    'fp32_test_acc': fp32_acc}, args.out)
+        print(f'\nsaved {args.out}')
 
 
 if __name__ == '__main__':

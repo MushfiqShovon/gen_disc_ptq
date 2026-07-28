@@ -37,6 +37,12 @@ def _sort_key(row):
     return (row.get('model', ''), bits, row.get('gpxq', ''))
 
 
+# The calibration-sensitivity experiment records the same measurements plus the
+# scheme, keyed additionally on it, into its own CSV (results/calib_sensitivity.csv).
+CALIB_FIELDS = FIELDS[:3] + ['calib_scheme'] + FIELDS[3:]
+CALIB_KEY = KEY + ('calib_scheme',)
+
+
 def read(path):
     path = Path(path)
     if not path.exists():
@@ -45,21 +51,21 @@ def read(path):
         return list(csv.DictReader(handle))
 
 
-def write(path, rows):
+def write(path, rows, fields=FIELDS):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = sorted(rows, key=_sort_key)
     with path.open('w', newline='') as handle:
-        writer = csv.DictWriter(handle, FIELDS)
+        writer = csv.DictWriter(handle, fields)
         writer.writeheader()
-        writer.writerows([{field: row.get(field, '') for field in FIELDS} for row in rows])
+        writer.writerows([{field: row.get(field, '') for field in fields} for row in rows])
     return path
 
 
-def record(path, row):
-    """Insert `row`, replacing any existing row with the same (model, bits, gpxq)."""
-    key = tuple(str(row.get(field, '')) for field in KEY)
+def record(path, row, fields=FIELDS, key=KEY):
+    """Insert `row`, replacing any existing row with the same key tuple."""
+    row_key = tuple(str(row.get(field, '')) for field in key)
     kept = [r for r in read(path)
-            if tuple(str(r.get(field, '')) for field in KEY) != key]
+            if tuple(str(r.get(field, '')) for field in key) != row_key]
     kept.append(row)
-    return write(path, kept)
+    return write(path, kept, fields)
