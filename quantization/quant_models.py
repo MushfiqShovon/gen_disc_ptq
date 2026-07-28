@@ -32,22 +32,31 @@ class QuantDiscModel(nn.Module):
     """
 
     def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim,
-                 n_layers=1, bit_width=8, quant=True):
+                 n_layers=1, bit_width=8, quant=True,
+                 emb_bit_width=None, lstm_bit_width=None, fc_bit_width=None):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.n_layers = n_layers
 
+        # Per-stage overrides exist for diagnosis: they let you hold one stage at
+        # high precision while crushing the rest, to find which stage a low-bit
+        # collapse actually comes from. All default to `bit_width`.
+        emb_bw = emb_bit_width or bit_width
+        lstm_bw = lstm_bit_width or bit_width
+        fc_bw = fc_bit_width or bit_width
+
         if quant:
-            emb_kw = dict(weight_quant=Int8WeightPerTensorFloat, weight_bit_width=bit_width)
-            act_kw = dict(act_quant=Int8ActPerTensorFloat, bit_width=bit_width)
-            lstm_kw = dict(weight_bit_width=bit_width, io_bit_width=bit_width,
-                           gate_acc_bit_width=bit_width, sigmoid_bit_width=bit_width,
-                           tanh_bit_width=bit_width, cell_state_bit_width=bit_width)
-            fc_kw = dict(weight_quant=Int8WeightPerTensorFloat, weight_bit_width=bit_width,
+            emb_kw = dict(weight_quant=Int8WeightPerTensorFloat, weight_bit_width=emb_bw)
+            emb_act_kw = dict(act_quant=Int8ActPerTensorFloat, bit_width=emb_bw)
+            pool_act_kw = dict(act_quant=Int8ActPerTensorFloat, bit_width=fc_bw)
+            lstm_kw = dict(weight_bit_width=lstm_bw, io_bit_width=lstm_bw,
+                           gate_acc_bit_width=lstm_bw, sigmoid_bit_width=lstm_bw,
+                           tanh_bit_width=lstm_bw, cell_state_bit_width=lstm_bw)
+            fc_kw = dict(weight_quant=Int8WeightPerTensorFloat, weight_bit_width=fc_bw,
                          bias_quant=Int32Bias)
         else:
             emb_kw = dict(weight_quant=None)
-            act_kw = dict(act_quant=None)
+            emb_act_kw = pool_act_kw = dict(act_quant=None)
             lstm_kw = dict(weight_quant=None, bias_quant=None, io_quant=None,
                            gate_acc_quant=None, sigmoid_quant=None, tanh_quant=None,
                            cell_state_quant=None)
@@ -57,7 +66,7 @@ class QuantDiscModel(nn.Module):
 
         # QuantEmbedding has no output activation quantizer of its own, so the
         # LSTM's input activation is quantized explicitly here.
-        self.emb_quant = qnn.QuantIdentity(return_quant_tensor=False, **act_kw)
+        self.emb_quant = qnn.QuantIdentity(return_quant_tensor=False, **emb_act_kw)
 
         self.lstm = qnn.QuantLSTM(embedding_dim, hidden_dim, num_layers=n_layers,
                                   batch_first=True, **lstm_kw)
@@ -65,7 +74,7 @@ class QuantDiscModel(nn.Module):
         # The masked mean runs in float; its result is the classifier's input
         # activation. return_quant_tensor=True hands QuantLinear the input scale
         # that Int32Bias needs to derive the bias scale.
-        self.pool_quant = qnn.QuantIdentity(return_quant_tensor=quant, **act_kw)
+        self.pool_quant = qnn.QuantIdentity(return_quant_tensor=quant, **pool_act_kw)
 
         self.fc = qnn.QuantLinear(hidden_dim, output_dim, bias=True, **fc_kw)
 
