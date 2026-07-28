@@ -35,6 +35,7 @@ import agnews_data  # noqa: E402
 import GenTrain  # noqa: E402
 from DiscTrain import collate as collate_padded  # noqa: E402  (plain pad + lengths)
 from models import GenModel  # noqa: E402
+import results  # noqa: E402
 from quant_models import QuantGenModel, load_gen_float_weights  # noqa: E402
 
 
@@ -156,6 +157,7 @@ def footprint(model, bit_width):
     print(f'  weights quantized: {quantized:,}/{total:,} ({100 * quantized / total:.1f}%)')
     print(f'  footprint: {fp32_mb:.2f} MB fp32 -> {quant_mb:.2f} MB at int{bit_width} '
           f'({fp32_mb / quant_mb:.2f}x, simulated)')
+    return fp32_mb, quant_mb, fp32_mb / quant_mb
 
 
 def main():
@@ -174,6 +176,7 @@ def main():
     p.add_argument('--gpxq-batches', type=int, default=32,
                    help='calibration batches for GPFQ/Qronos (each runs all labels, twice)')
     p.add_argument('--skip-float-reference', action='store_true')
+    p.add_argument('--results', type=Path, default=ROOT / 'results/ptq_results.csv')
     args = p.parse_args()
 
     if args.out is None:
@@ -212,11 +215,13 @@ def main():
     print(f'  1. float32             nll {fp32_nll:7.1f} | acc {fp32_acc:6.2f}   '
           f'[{time.time() - start:.0f}s]')
 
+    float_ref_acc = ''
     if not args.skip_float_reference:
         start = time.time()
         reference = QuantGenModel(**dims, bit_width=args.bit_width, quant=False).to(device)
         load_gen_float_weights(reference, state)
         nll, acc = evaluate(padded['test'], reference, device, nclass)
+        float_ref_acc = acc
         print(f'  2. float reference     nll {nll:7.1f} | acc {acc:6.2f}  '
               f'({acc - fp32_acc:+.2f} vs float32)   [{time.time() - start:.0f}s]')
         del reference
@@ -242,7 +247,18 @@ def main():
           f'({test_acc - fp32_acc:+.2f} vs float32)   [{time.time() - start:.0f}s]')
 
     print()
-    footprint(quantized, args.bit_width)
+    fp32_mb, quant_mb, ratio = footprint(quantized, args.bit_width)
+
+    row = {'model': 'gen', 'bit_width': args.bit_width, 'gpxq': args.gpxq,
+           'fp32_test_acc': f'{fp32_acc:.2f}', 'float_ref_test_acc': (
+               f'{float_ref_acc:.2f}' if float_ref_acc != '' else ''),
+           'dev_acc': f'{dev_acc:.2f}', 'test_acc': f'{test_acc:.2f}',
+           'delta_vs_fp32': f'{test_acc - fp32_acc:+.2f}', 'test_metric': f'{test_nll:.4f}',
+           'calib_docs': args.calib_batches * args.batch_size,
+           'gpxq_batches': args.gpxq_batches if args.gpxq != 'none' else '',
+           'fp32_mb': f'{fp32_mb:.2f}', 'quant_mb': f'{quant_mb:.2f}',
+           'compression': f'{ratio:.2f}'}
+    print(f'  recorded -> {results.record(args.results, row)}')
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({'state_dict': quantized.state_dict(), 'vocab': vocab, 'classes': classes,

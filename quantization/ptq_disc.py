@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agnews_data  # noqa: E402
 from DiscTrain import collate, evaluate  # noqa: E402
 from models import DiscModel  # noqa: E402
+import results  # noqa: E402
 from quant_models import QuantDiscModel, load_float_weights  # noqa: E402
 
 
@@ -136,6 +137,7 @@ def footprint(model, bit_width):
           f'({100 * quantized / total:.1f}%)')
     print(f'  footprint: {fp32_mb:.2f} MB fp32 -> {quant_mb:.2f} MB at int{bit_width} '
           f'({fp32_mb / quant_mb:.2f}x, simulated)')
+    return fp32_mb, quant_mb, fp32_mb / quant_mb
 
 
 def report(name, loader, model, criterion, device, baseline=None):
@@ -143,7 +145,7 @@ def report(name, loader, model, criterion, device, baseline=None):
     loss, acc = evaluate(loader, model, criterion, device)
     delta = '' if baseline is None else f'  ({acc - baseline:+.2f} vs float32)'
     print(f'  {name:22s} loss {loss:.4f} | acc {acc:6.2f}{delta}   [{time.time() - start:.0f}s]')
-    return acc
+    return loss, acc
 
 
 def main():
@@ -163,6 +165,7 @@ def main():
     p.add_argument('--gpxq-batches', type=int, default=32)
     p.add_argument('--skip-float-reference', action='store_true',
                    help='skip the quantizers-off sanity evaluation (it is slow)')
+    p.add_argument('--results', type=Path, default=ROOT / 'results/ptq_results.csv')
     args = p.parse_args()
 
     # Name the checkpoint after the bit width so an ablation sweep does not
@@ -191,12 +194,14 @@ def main():
     float_model = DiscModel(dims['vocab_size'], dims['embedding_dim'], dims['hidden_dim'],
                             dims['output_dim'], dims['n_layers'], False, 0.0, args.bit_width)
     float_model.load_state_dict(state)
-    fp32_acc = report('1. float32', loaders['test'], float_model.to(device), criterion, device)
+    _, fp32_acc = report('1. float32', loaders['test'], float_model.to(device), criterion, device)
 
+    float_ref_acc = ''
     if not args.skip_float_reference:
         reference = QuantDiscModel(**dims, bit_width=args.bit_width, quant=False)
         load_float_weights(reference, state)
-        report('2. float reference', loaders['test'], reference.to(device), criterion, device, fp32_acc)
+        _, float_ref_acc = report('2. float reference', loaders['test'], reference.to(device),
+                               criterion, device, fp32_acc)
 
     print(f'\n== calibrating on {args.calib_batches} training batches ==')
     quantized = QuantDiscModel(**dims, bit_width=args.bit_width, quant=True)
@@ -210,11 +215,23 @@ def main():
 
     print('\n== quantized ==')
     tag = f'int{args.bit_width}' + ('' if args.gpxq == 'none' else f'+{args.gpxq}')
-    dev_acc = report('   dev', loaders['valid'], quantized, criterion, device)
-    test_acc = report(f'3. {tag}', loaders['test'], quantized, criterion, device, fp32_acc)
+    _, dev_acc = report('   dev', loaders['valid'], quantized, criterion, device)
+    test_loss, test_acc = report(f'3. {tag}', loaders['test'], quantized, criterion,
+                                 device, fp32_acc)
 
     print()
-    footprint(quantized, args.bit_width)
+    fp32_mb, quant_mb, ratio = footprint(quantized, args.bit_width)
+
+    row = {'model': 'disc', 'bit_width': args.bit_width, 'gpxq': args.gpxq,
+           'fp32_test_acc': f'{fp32_acc:.2f}', 'float_ref_test_acc': (
+               f'{float_ref_acc:.2f}' if float_ref_acc != '' else ''),
+           'dev_acc': f'{dev_acc:.2f}', 'test_acc': f'{test_acc:.2f}',
+           'delta_vs_fp32': f'{test_acc - fp32_acc:+.2f}', 'test_metric': f'{test_loss:.4f}',
+           'calib_docs': args.calib_batches * args.batch_size,
+           'gpxq_batches': args.gpxq_batches if args.gpxq != 'none' else '',
+           'fp32_mb': f'{fp32_mb:.2f}', 'quant_mb': f'{quant_mb:.2f}',
+           'compression': f'{ratio:.2f}'}
+    print(f'  recorded -> {results.record(args.results, row)}')
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({'state_dict': quantized.state_dict(), 'vocab': vocab, 'classes': classes,
